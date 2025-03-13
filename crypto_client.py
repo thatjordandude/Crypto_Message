@@ -1,20 +1,25 @@
 import socket
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives import padding as sym_padding
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import rsa, padding
+#from cryptography.hazmat.primitives import hashes
+#from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.serialization import load_pem_public_key
 from cryptography.hazmat.backends import default_backend
 import base64
 import os
-
-PRE_GENERATED_KEY = b"J7F41fME8FWOIM8UTzMF6GiZW5rFKxIeU3CjFHvArOa7vtIxZRkupW2XXn7r5Fb+"[:32]  # 256-bit key (32 bytes)
+import sys #NEW
 
 # AES encryption function
-def encrypt_message(message, key):
+def encrypt_message(message, aes_key):
     iv = os.urandom(16)  # Random 16 bytes for IV
-    cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+    cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv), backend=default_backend())
     encryptor = cipher.encryptor()
     
     # Pad the message to be a multiple of block size (AES block size is 16 bytes)
-    padder = padding.PKCS7(algorithms.AES.block_size).padder()
+    #print(f"AES KEY IS: {aes_key}")
+    padder = sym_padding.PKCS7(algorithms.AES.block_size).padder()
     padded_message = padder.update(message.encode()) + padder.finalize()
     
     # Encrypt the message
@@ -24,36 +29,64 @@ def encrypt_message(message, key):
     return base64.b64encode(iv).decode(), base64.b64encode(ciphertext).decode()
 
 # AES decryption function
-def decrypt_message(iv_base64, ciphertext_base64, key):
+def decrypt_message(iv_base64, ciphertext_base64, aes_key):
     iv = base64.b64decode(iv_base64)
     ciphertext = base64.b64decode(ciphertext_base64)
     
-    cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+    cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv), backend=default_backend())
     decryptor = cipher.decryptor()
     
     # Decrypt the message
     decrypted_padded_message = decryptor.update(ciphertext) + decryptor.finalize()
     
     # Unpad the decrypted message
-    unpadder = padding.PKCS7(algorithms.AES.block_size).unpadder()
+    unpadder = sym_padding.PKCS7(algorithms.AES.block_size).unpadder()
     message = unpadder.update(decrypted_padded_message) + unpadder.finalize()
     
     return message.decode()
 
 # Client function
-def start_client(host, port, key):
+#def start_client(host, port, key):
+def start_client(host, port):
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     client_socket.connect((host, port))
+    
+    #Generate AES 32 byte Key
+    aes_key = os.urandom(32)
+    print(f"AES 32 byte key generated : {aes_key}")  				#for debugging
+
+    # Receive public key from Server
+    serialized_public_key = client_socket.recv(1024)
+    print(f"Serialized RSA_public Key received : {serialized_public_key}")				#for debugging
+
+    #Deseralize the key bytes back to PEM format for use with encoding
+    RSA_public_key = load_pem_public_key(serialized_public_key)
+    print("Serialized RSA_public key converted to key instance")
+
+    # encrypt AES Key with server generated RSA public key - encryption seems to need padding??
+    encrypted_AES = RSA_public_key.encrypt(aes_key, padding.OAEP(
+        mgf=padding.MGF1(algorithm=hashes.SHA256()),
+        algorithm=hashes.SHA256(),
+        label=None
+        )
+    )       
+
+    # send encrypted key AES Key to server !!! issue with encrypted_AES.encode()
+    client_socket.send(encrypted_AES) #.encode()) <- eliminating this seemed to work
+    print(f"RSA_public key has encrypted AES Key, sending to Server, encrypted AES key is: ", {encrypted_AES})
+
+    # good to communicate with AES Symmetric key. 
 
     while True:
         # Input message to be sent to the server
+        #print(f"AES Key is: {aes_key}")					# debugging
         message = input("Enter message: ")
         
         if message.lower() == "exit":
             break
         
         # Encrypt the message
-        iv_base64, ciphertext_base64 = encrypt_message(message, key)
+        iv_base64, ciphertext_base64 = encrypt_message(message, aes_key)
         
         # Send encrypted message to the server
         client_socket.send(f"{iv_base64}:{ciphertext_base64}".encode())
@@ -61,14 +94,14 @@ def start_client(host, port, key):
         # Receive the response from the server
         response = client_socket.recv(1024).decode()
 
-        print(f"Response from server: {response}")  # Add this debug line
+        #print(f"Response from server: {response}")  # Add this debug line
 
         try:
             iv_base64, ciphertext_base64 = response.split(":", 1)
             
-            # Decrypt the server's response
-            decrypted_response = decrypt_message(iv_base64, ciphertext_base64, key)
-            print(f"Server response: {decrypted_response}")
+            # Decrypt the server's response   
+            decrypted_response = decrypt_message(iv_base64, ciphertext_base64, aes_key)
+            #print(f"Server response: {decrypted_response}")			# Add this debug line
         except ValueError as e:
             print(f"Error: {e}")
             print("Received response was:", response)  # Debug: Print the response to see what was received
@@ -76,4 +109,13 @@ def start_client(host, port, key):
     client_socket.close()
 
 if __name__ == "__main__":
-    start_client('10.0.0.103', 65432, PRE_GENERATED_KEY)
+#start_client('192.168.1.54', 65432, PRE_GENERATED_KEY)
+
+    while len(sys.argv) != 3:
+        print("USE IP: 192.168.1.54 & PORT: 65432 \nSyntax: <script> <IP address> <Port #>")
+        exit() 
+    ip_Addr = str(sys.argv[1])
+    port = int(sys.argv[2])
+    start_client(ip_Addr, port)
+
+
