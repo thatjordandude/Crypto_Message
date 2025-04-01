@@ -10,8 +10,9 @@ import base64
 import os
 import sys
 
-#This cannot be hard coded and needs to be generated. 
-#PRE_GENERATED_KEY = b"J7F41fME8FWOIM8UTzMF6GiZW5rFKxIeU3CjFHvArOa7vtIxZRkupW2XXn7r5Fb+"[:32]  # ENTER KEY HERE 32 bytes!
+client_public_keys = {}  # Dictionary to store client public keys
+client_connections = {}  # O track client connections for fun
+
 
 # AES encryption function
 def encrypt_message(message, key):
@@ -52,29 +53,86 @@ def start_server(host, port):
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.bind((host, port))
     server_socket.listen(5) # Changed from 1 to 5
+    
     print(f"Server started on {host}:{port}")
     
-    #while True: # Loop here to accept multiple socets/connetions
+    #while True: # Loop here to accept multiple sockets/connetions
     conn, addr = server_socket.accept()
     print(f"Connection established with {addr}\n")
 
-    # Send public key to Client
+
+    #load or gen RSA keys for the server 
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public_key = private_key.public_key()
+
+    # Send public key to Client    
+    # Moved from bottom to here
+    serialized_public_key = public_key.public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo)
+    
     conn.send(serialized_public_key)
-    #print(f"Serialized RSA_public key sent {serialized_public_key}\n")
+    print(f"Serialized RSA_public key sent {serialized_public_key}\n")
 
     # Receive AES Key from client, decrypt with RSA private key.
-    AES_encrypted_key = conn.recv(1024)
-    aes_key = private_key.decrypt(AES_encrypted_key, padding.OAEP(
+    encrypted_aes_key = conn.recv(2048)
+    aes_key = private_key.decrypt(encrypted_aes_key, padding.OAEP(
         mgf=padding.MGF1(algorithm=hashes.SHA256()),
         algorithm=hashes.SHA256(),
         label=None
-        )
-    )
-    #print(f"Received encrypted AES key: {AES_encrypted_key}\n\nDecrypted key is:\n{aes_key}")				# for debugging
+    ))
 
+    print(f"AES key decrypted: {aes_key.hex()}")				# for debugging
+    serialized_public_key = conn.recv(2048)  
+    client_public_key = serialization.load_pem_public_key(serialized_public_key)
+
+    encrypted_aes_key = client_public_key.encrypt(aes_key, padding.OAEP(
+        mgf=padding.MGF1(algorithm=hashes.SHA256()),
+        algorithm=hashes.SHA256(),
+        label=None
+    ))
     # good to communicate with AES Symmetric key. 
 
     while True:
+        
+        
+        #Recieve public keys upon connection
+        
+        print(f"Connected by {addr}")
+
+        #  Receive client's public key
+        serialized_public_key = conn.recv(2048)  # Buffer size can be increased as needed
+        client_public_key = serialization.load_pem_public_key(serialized_public_key)
+
+        # Store client's public key and connection info
+        client_public_keys[addr] = client_public_key
+        client_connections[addr] = conn
+
+        print(f"Stored public key for client {addr}")
+        
+        #Handle Public Key Requests
+        while True:
+            # Receive request
+            request = conn.recv(1024).decode()
+            
+            if request.startswith("GET_KEY"):
+                # Format: GET_KEY <target_client_addr>
+                _, target_ip, target_port = request.split()
+                target_addr = (target_ip, int(target_port))
+                
+                if target_addr in client_public_keys:
+                    # Send serialized public key back
+                    target_pub_key = client_public_keys[target_addr]
+                    serialized_key = target_pub_key.public_bytes(
+                        encoding=serialization.Encoding.PEM,
+                        format=serialization.PublicFormat.SubjectPublicKeyInfo
+                    )
+                    conn.sendall(serialized_key)
+                    print(f"Sent public key of {target_addr} to {addr}")
+                else:
+                    conn.sendall(b"ERROR: Client not found")
+            
+            elif request == "EXIT":
+                break
+
         # Receive encrypted message from client
         data = conn.recv(1024)
         if not data:
@@ -93,6 +151,12 @@ def start_server(host, port):
         conn.send(f"{iv_base64}:{ciphertext_base64}".encode())
 
     conn.close()
+    #added Cleanup When Client Disconnects
+    client_public_keys.pop(addr, None)
+    client_connections.pop(addr, None)
+    print(f"Client {addr} disconnected")
+    
+
 
 if __name__ == "__main__":
     #start_server('192.168.1.54', 65432, PRE_GENERATED_KEY)
@@ -104,23 +168,10 @@ if __name__ == "__main__":
     port = int(sys.argv[1])
     print(f"HOST NAME:{host_name} - IP ADDRESS:{ip_addr}:{port}")
 
-# Below generates an instance of RSAPrivateKey
-    private_key = rsa.generate_private_key(
-        public_exponent=65537,
-        key_size=2048,
-    )
 
-# Generates RSA PUBLIC KEY instance from PRIVATE KEY. 
-    public_key = private_key.public_key()
 
-#Serializes key to allow transfer of key instance by converting to bytes.
-    serialized_public_key = public_key.public_bytes(
-        encoding=serialization.Encoding.PEM, 				#PEM is base 64 encoding.
-        format=serialization.PublicFormat.SubjectPublicKeyInfo	        #SubjectPublicKeyInfo is default format. 
-    )
 
     start_server(ip_addr, port)
 
 
-# I think I need to switch what we do here. The server should generate the Symmetric Key. Each additionl client should generate their own Pbulic key and send to the server to hve the server send out the symmetric key. The clients then decode the symmetric key with their Private RSA Key. 
-
+# 
